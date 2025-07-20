@@ -1,0 +1,69 @@
+###############################################################
+#                     REQUIREMENTS.TXT                        #
+#    -- All dependencies for LLM pretraining pipeline --      #
+#      Comments show purpose and if the lib is optional       #
+###############################################################
+
+# === Core PyTorch and Ecosystem ===
+torch               # Core deep learning framework (CPU+GPU)
+torchvision         # Image utilities/models (optional, vision tasks)
+torchaudio          # Audio utilities/models (optional)
+
+# === Training & Experiment Management ===
+tensorboard         # Training visualization/logging dashboard
+tqdm                # Fast, pretty progress bars
+
+# === GPU, Performance, and Advanced DL ===
+pynvml              # GPU monitoring (VRAM usage, status)
+flash-attn          # Ultra-fast transformer attention kernels (optional for LLMs, only works on some GPUs)
+bitsandbytes        # 8-bit (and 4-bit) optimizers/quantization (optional, for speed/memory savings)
+
+# === Hugging Face + NLP Ecosystem ===
+transformers        # Hugging Face models, pipelines, tokenizers
+datasets            # Hugging Face datasets (streaming/loading)
+accelerate          # Easy multi-GPU/TPU setup (useful for DDP or FSDP)
+safetensors         # Fast, secure model checkpoints
+sentencepiece       # Tokenizer (required for some models/datasets)
+huggingface-hub     # Upload/download models/datasets from Hugging Face Hub
+
+# === Data Science & Visualization ===
+numpy               # General math and array library
+matplotlib          # Visualization/plotting
+scikit-learn        # Classic ML utilities, metrics, splitting, etc.
+pandas              # DataFrames, CSVs, tabular data
+seaborn             # Statistical data visualization
+
+# === Image Processing (optional) ===
+opencv-python       # Computer vision/image utilities (optional)
+Pillow              # Image loading/saving (optional)
+
+# === Diffusion/Generative Models (optional) ===
+diffusers           # Diffusion models (Stable Diffusion, etc.)
+
+# === Utility/Helpers ===
+einops              # Clean tensor reshaping and manipulation
+python-dotenv       # Load secret/config variables from .env file
+requests            # For HTTP/API downloads and web queries
+
+# === Interactive Notebooks (optional) ===
+# jupyterlab        # JupyterLab notebooks (for prototyping)
+# ipywidgets        # Rich interactive widgets (for notebooks)
+
+# === Extra: YAML Configs (optional, if you use .yaml for configs) ===
+# pyyaml
+
+# === Data Compression (optional, for huge datasets) ===
+# zstandard
+# lz4
+
+# === Nice CLI Logging (optional, for better logs) ===
+# rich
+
+# === RunPod CLI (optional, for job automation with RunPod) ===
+# runpod-python     # See: https://github.com/runpod/runpod-python
+
+###############################################################
+# Standard library modules (os, argparse, pathlib, etc.)
+# do NOT go in requirements.txt (Python always has these)
+###############################################################
+
