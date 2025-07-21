@@ -25,9 +25,9 @@ EASY_TOKEN_TARGET = int(TOTAL_TOKENS_TARGET * 0.6)  # 1.8B tokens
 HARD_TOKEN_TARGET = int(TOTAL_TOKENS_TARGET * 0.4)  # 1.2B tokens
 
 # === LEARNING RATE SCHEDULE ===
-LEARNING_RATE = 1e-4                                      # Conservative start
+LEARNING_RATE = 3e-4                                       # Conservative start
 WARMUP_STEPS = int(0.03 * TOTAL_TRAINING_STEPS)         # ~687 steps
-MIN_LEARNING_RATE = 1e-5                                 # For cosine decay
+MIN_LEARNING_RATE = 3e-5                                 # For cosine decay
 
 # === CHECKPOINTING (every 100M tokens) ===
 CHECKPOINT_INTERVAL = 100_000_000 // TOKENS_PER_STEP     # 763 steps
