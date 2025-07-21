@@ -1,5 +1,9 @@
+# src/dataset.py - Optimized streaming dataset with proper sharding
+
 from datasets import load_dataset
 import torch
+from typing import Iterator, Tuple
+import time
 
 # === Curriculum Filtering Functions ===
 
@@ -29,60 +33,95 @@ def hard_filter(ex):
         and len(ex.get('text', '')) > 800
     )
 
-# === Streaming Loader with Curriculum ===
+# === Streaming Loader with Proper Sharding ===
 
-def filtered_stream(stage, seed, rank, buffer_size=100_000):
+def filtered_stream(stage, seed, shard_id, num_shards, buffer_size=500_000):
     """
-    Loads the streaming HuggingFaceFW/fineweb-edu dataset,
-    applies shuffling (buffered) and stage-specific filtering.
+    Loads the streaming HuggingFaceFW/fineweb-edu dataset with proper sharding.
+    Each GPU only processes its assigned shard of data.
     """
-    print(f"Loading HuggingFaceFW/fineweb-edu ({stage} curriculum stage)...")
+    print(f"[Rank {shard_id}] Loading HuggingFaceFW/fineweb-edu ({stage} curriculum stage)...")
+    
     stream = load_dataset(
         "HuggingFaceFW/fineweb-edu",
         split="train",
         streaming=True,
     )
-    # Buffered shuffle for better randomness (increase if RAM allows)
-    stream = stream.shuffle(seed=seed + rank, buffer_size=buffer_size)
+    
+    # Larger buffer for better shuffling (adjust based on available RAM)
+    stream = stream.shuffle(seed=seed + shard_id, buffer_size=buffer_size)
+    
+    # Apply stage filter first
     if stage == 'easy':
-        return filter(easy_filter, stream)
+        stream = stream.filter(easy_filter)
     else:
-        return filter(hard_filter, stream)
+        stream = stream.filter(hard_filter)
+    
+    # Shard the data: each GPU only sees every num_shards-th example
+    def shard_filter(example, idx):
+        return idx % num_shards == shard_id
+    
+    # Apply sharding filter
+    stream = stream.filter(shard_filter, with_indices=True)
+    
+    return stream
 
 class Curriculum2BTokenDataset(torch.utils.data.IterableDataset):
     """
     Streaming IterableDataset for curriculum-based LLM pretraining.
-    - Streams 'easy' then 'hard' phase in order.
-    - Stops when 2B tokens reached (or user-specified limits).
+    - Streams 'easy' then 'hard' phase in order
+    - Properly shards data across multiple GPUs
+    - Stops when token targets are reached
     """
-    def __init__(self, tokenizer, block_size, easy_token_target, hard_token_target, seed=42, rank=0):
+    def __init__(self, tokenizer, block_size, easy_token_target, hard_token_target, 
+                 seed=42, shard_id=0, num_shards=1):
         self.tokenizer = tokenizer
         self.block_size = block_size
-        self.easy_token_target = easy_token_target
-        self.hard_token_target = hard_token_target
+        # Divide targets by number of shards since each GPU processes a portion
+        self.easy_token_target = easy_token_target // num_shards
+        self.hard_token_target = hard_token_target // num_shards
         self.seed = seed
-        self.rank = rank
+        self.shard_id = shard_id
+        self.num_shards = num_shards
+        
+        print(f"[Rank {shard_id}] Dataset initialized:")
+        print(f"  - Easy tokens target: {self.easy_token_target:,}")
+        print(f"  - Hard tokens target: {self.hard_token_target:,}")
+        print(f"  - Total tokens target: {self.easy_token_target + self.hard_token_target:,}")
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         stages = [
             ('easy', self.easy_token_target),
             ('hard', self.hard_token_target)
         ]
         buffer = []
         total_tokens_yielded = 0
+        examples_processed = 0
+        start_time = time.time()
 
         for stage, token_target in stages:
-            curr_stream = filtered_stream(stage, self.seed, self.rank)
+            curr_stream = filtered_stream(stage, self.seed, self.shard_id, self.num_shards)
             curr_tokens = 0
-            print(f"\n[CURRICULUM] Starting '{stage.upper()}' phase for {token_target:,} tokens...")
+            stage_examples = 0
+            
+            print(f"\n[Rank {self.shard_id}] Starting '{stage.upper()}' phase for {token_target:,} tokens...")
+            
             for example in curr_stream:
-                # Tokenize on the fly; can be slow but RAM-efficient.
-                tokens = self.tokenizer.encode(example['text'], add_special_tokens=False)
+                # Tokenize on the fly
+                try:
+                    tokens = self.tokenizer.encode(example['text'], add_special_tokens=False)
+                except Exception as e:
+                    print(f"[Rank {self.shard_id}] Tokenization error: {e}")
+                    continue
+                
                 if not tokens:
                     continue
+                
                 buffer.extend(tokens)
                 curr_tokens += len(tokens)
                 total_tokens_yielded += len(tokens)
+                examples_processed += 1
+                stage_examples += 1
 
                 # Yield block_size training chunks as (x, y) pairs
                 while len(buffer) >= self.block_size + 1:
@@ -92,49 +131,82 @@ class Curriculum2BTokenDataset(torch.utils.data.IterableDataset):
                     y = torch.tensor(y_chunk, dtype=torch.long)
                     yield x, y
                     buffer = buffer[self.block_size:]
-                    # End phase when token target met
-                    if curr_tokens >= token_target:
-                        print(f"[CURRICULUM] {stage.upper()} phase reached {curr_tokens:,} tokens.")
-                        break
+                
+                # Progress reporting every 10M tokens
+                if curr_tokens % 10_000_000 == 0:
+                    elapsed = time.time() - start_time
+                    tokens_per_sec = total_tokens_yielded / elapsed if elapsed > 0 else 0
+                    print(f"[Rank {self.shard_id}] {stage}: {curr_tokens:,}/{token_target:,} tokens "
+                          f"({stage_examples:,} examples, {tokens_per_sec:.0f} tok/s)")
+                
+                # End phase when token target met
+                if curr_tokens >= token_target:
+                    print(f"[Rank {self.shard_id}] {stage.upper()} phase completed: "
+                          f"{curr_tokens:,} tokens from {stage_examples:,} examples")
+                    break
+            
+            # Clear buffer between stages
             buffer = []
-            # End stream if total curriculum tokens reached
+            
+            # End if total tokens reached
             if total_tokens_yielded >= (self.easy_token_target + self.hard_token_target):
-                print("[CURRICULUM] Total 2B tokens reached. Stopping dataset stream.")
                 break
+        
+        print(f"[Rank {self.shard_id}] Dataset iteration complete. "
+              f"Total: {total_tokens_yielded:,} tokens from {examples_processed:,} examples")
 
 # === Validation Dataset Construction ===
 
-def build_val_dataset(tokenizer, block_size, val_size=1000, seed=42, buffer_size=100_000):
+def build_val_dataset(tokenizer, block_size, val_size=1000, seed=42):
     """
-    Build a small, fixed-size validation dataset by streaming the first N English, quality-filtered samples.
-    - Returns a list of (x, y) tensor pairs.
+    Build a small, fixed-size validation dataset.
+    Returns a list of (x, y) tensor pairs.
     """
     print(f"[VAL DATASET] Building validation set with {val_size} samples...")
+    
     stream = load_dataset(
         "HuggingFaceFW/fineweb-edu",
         split="train",
         streaming=True,
     )
-    # Only keep English and int_score >= 3 examples
-    stream = filter(lambda ex: ex.get('language', '') == 'en' and ex.get('int_score', 0) >= 3, stream)
+    
+    # Only keep English and quality examples
+    def val_filter(ex):
+        return (
+            ex.get('language', '') == 'en' 
+            and ex.get('int_score', 0) >= 3
+            and 400 < len(ex.get('text', '')) < 2000  # Medium length for validation
+        )
+    
+    stream = stream.filter(val_filter)
+    stream = stream.shuffle(seed=seed, buffer_size=10_000)
+    
     buffer = []
     val_samples = 0
     xs, ys = [], []
+    
     for example in stream:
-        tokens = tokenizer.encode(example['text'], add_special_tokens=False)
+        try:
+            tokens = tokenizer.encode(example['text'], add_special_tokens=False)
+        except:
+            continue
+            
         buffer.extend(tokens)
-        # Yield block_size chunks
-        while len(buffer) >= block_size + 1:
+        
+        # Extract block_size chunks
+        while len(buffer) >= block_size + 1 and val_samples < val_size:
             x_chunk = buffer[:block_size]
             y_chunk = buffer[1:block_size + 1]
             xs.append(torch.tensor(x_chunk, dtype=torch.long))
             ys.append(torch.tensor(y_chunk, dtype=torch.long))
             buffer = buffer[block_size:]
             val_samples += 1
+            
             if val_samples >= val_size:
                 print(f"[VAL DATASET] Built {val_samples} validation samples.")
                 return list(zip(xs, ys))
-    print(f"[VAL DATASET] Built {val_samples} validation samples (stream ended).")
+    
+    print(f"[VAL DATASET] Built {val_samples} validation samples (stream ended early).")
     return list(zip(xs, ys))
 
 # === End of dataset.py ===
