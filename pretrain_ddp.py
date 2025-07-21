@@ -390,6 +390,7 @@ def main(rank, world_size, args):
         betas=(0.9, 0.95),
         weight_decay=0.1,
         eps=1e-8
+        fused=True  
     )
     
     # Cosine scheduler with warmup

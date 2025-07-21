@@ -35,7 +35,7 @@ def hard_filter(ex):
 
 # === Streaming Loader with Proper Sharding ===
 
-def filtered_stream(stage, seed, shard_id, num_shards, buffer_size=500_000):
+def filtered_stream(stage, seed, shard_id, num_shards, buffer_size=50_000):
     """
     Loads the streaming HuggingFaceFW/fineweb-edu dataset with proper sharding.
     Each GPU only processes its assigned shard of data.

@@ -11,9 +11,9 @@ DAILY_TOKEN_TARGET = 500_000_000     # 500M tokens per day
 TRAINING_DAYS = 6                     # 3B / 500M = 6 days
 
 # === TRAINING BATCH AND SEQUENCE SETTINGS ===
-BATCH_SIZE = 8                        # Per GPU batch size
+BATCH_SIZE = 192                        # Per GPU batch size
 BLOCK_SIZE = 2048                     # Sequence length in tokens
-ACCUMULATION_STEPS = 4                # Gradient accumulation steps
+ACCUMULATION_STEPS = 1                # Gradient accumulation steps
 
 # === CALCULATED TRAINING STEPS ===
 TOKENS_PER_STEP = BATCH_SIZE * BLOCK_SIZE * 2 * ACCUMULATION_STEPS  # 131,072
@@ -39,7 +39,7 @@ VAL_INTERVAL = 500               # Validate every 500 steps
 VAL_STEPS = 100                  # Validation batches
 
 # === DATA LOADER ===
-NUM_WORKERS = 0                  # For streaming dataset
+NUM_WORKERS = 1                  # For streaming dataset
 PREFETCH_FACTOR = 2              # Prefetch batches
 
 # === MODEL HYPERPARAMETERS ===
