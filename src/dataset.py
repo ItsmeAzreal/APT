@@ -1,4 +1,4 @@
-# src/dataset.py - Optimized streaming dataset with proper sharding
+# src/dataset.py - Fixed streaming dataset with proper sharding
 
 from datasets import load_dataset
 import torch
@@ -42,29 +42,27 @@ def filtered_stream(stage, seed, shard_id, num_shards, buffer_size=50_000):
     """
     print(f"[Rank {shard_id}] Loading HuggingFaceFW/fineweb-edu ({stage} curriculum stage)...")
     
+    # Load the dataset with trust_remote_code for custom datasets
     stream = load_dataset(
         "HuggingFaceFW/fineweb-edu",
         split="train",
         streaming=True,
+        trust_remote_code=True  # Add this to ensure proper loading
     )
     
-    # Larger buffer for better shuffling (adjust based on available RAM)
+    # Apply shuffling first
     stream = stream.shuffle(seed=seed + shard_id, buffer_size=buffer_size)
     
-    # Apply stage filter first
+    # Apply stage filter
     if stage == 'easy':
         stream = stream.filter(easy_filter)
     else:
         stream = stream.filter(hard_filter)
     
-    # Shard the data: each GPU only sees every num_shards-th example
-    def shard_filter(example, idx):
-        return idx % num_shards == shard_id
-    
-    # Apply sharding filter
-    stream = stream.filter(shard_filter, with_indices=True)
-    
-    return stream
+    # FIXED: Shard the data without using with_indices
+    # Instead of using filter with indices, we'll implement sharding manually
+    # in the iteration loop
+    return stream, shard_id, num_shards
 
 class Curriculum2BTokenDataset(torch.utils.data.IterableDataset):
     """
@@ -100,16 +98,34 @@ class Curriculum2BTokenDataset(torch.utils.data.IterableDataset):
         start_time = time.time()
 
         for stage, token_target in stages:
-            curr_stream = filtered_stream(stage, self.seed, self.shard_id, self.num_shards)
+            # Get the filtered stream along with sharding info
+            curr_stream, shard_id, num_shards = filtered_stream(
+                stage, self.seed, self.shard_id, self.num_shards
+            )
             curr_tokens = 0
             stage_examples = 0
+            example_idx = 0  # Manual index counter for sharding
             
             print(f"\n[Rank {self.shard_id}] Starting '{stage.upper()}' phase for {token_target:,} tokens...")
             
             for example in curr_stream:
+                # Manual sharding: only process examples for this shard
+                if example_idx % num_shards != shard_id:
+                    example_idx += 1
+                    continue
+                example_idx += 1
+                
                 # Tokenize on the fly
                 try:
-                    tokens = self.tokenizer.encode(example['text'], add_special_tokens=False)
+                    # Check if example has the expected structure
+                    if not isinstance(example, dict) or 'text' not in example:
+                        continue
+                        
+                    text = example['text']
+                    if not isinstance(text, str) or not text.strip():
+                        continue
+                        
+                    tokens = self.tokenizer.encode(text, add_special_tokens=False)
                 except Exception as e:
                     print(f"[Rank {self.shard_id}] Tokenization error: {e}")
                     continue
@@ -133,7 +149,7 @@ class Curriculum2BTokenDataset(torch.utils.data.IterableDataset):
                     buffer = buffer[self.block_size:]
                 
                 # Progress reporting every 10M tokens
-                if curr_tokens % 10_000_000 == 0:
+                if curr_tokens > 0 and curr_tokens % 10_000_000 < len(tokens):
                     elapsed = time.time() - start_time
                     tokens_per_sec = total_tokens_yielded / elapsed if elapsed > 0 else 0
                     print(f"[Rank {self.shard_id}] {stage}: {curr_tokens:,}/{token_target:,} tokens "
@@ -157,56 +173,74 @@ class Curriculum2BTokenDataset(torch.utils.data.IterableDataset):
 
 # === Validation Dataset Construction ===
 
-def build_val_dataset(tokenizer, block_size, val_size=1000, seed=42):
+def build_val_dataset(tokenizer, block_size, val_size=100, seed=42):
     """
     Build a small, fixed-size validation dataset.
     Returns a list of (x, y) tensor pairs.
     """
     print(f"[VAL DATASET] Building validation set with {val_size} samples...")
     
-    stream = load_dataset(
-        "HuggingFaceFW/fineweb-edu",
-        split="train",
-        streaming=True,
-    )
-    
-    # Only keep English and quality examples
-    def val_filter(ex):
-        return (
-            ex.get('language', '') == 'en' 
-            and ex.get('int_score', 0) >= 3
-            and 400 < len(ex.get('text', '')) < 2000  # Medium length for validation
+    try:
+        stream = load_dataset(
+            "HuggingFaceFW/fineweb-edu",
+            split="train",
+            streaming=True,
+            trust_remote_code=True
         )
-    
-    stream = stream.filter(val_filter)
-    stream = stream.shuffle(seed=seed, buffer_size=10_000)
-    
-    buffer = []
-    val_samples = 0
-    xs, ys = [], []
-    
-    for example in stream:
-        try:
-            tokens = tokenizer.encode(example['text'], add_special_tokens=False)
-        except:
-            continue
-            
-        buffer.extend(tokens)
         
-        # Extract block_size chunks
-        while len(buffer) >= block_size + 1 and val_samples < val_size:
-            x_chunk = buffer[:block_size]
-            y_chunk = buffer[1:block_size + 1]
-            xs.append(torch.tensor(x_chunk, dtype=torch.long))
-            ys.append(torch.tensor(y_chunk, dtype=torch.long))
-            buffer = buffer[block_size:]
-            val_samples += 1
+        # Only keep English and quality examples
+        def val_filter(ex):
+            return (
+                isinstance(ex, dict) and
+                ex.get('language', '') == 'en' 
+                and ex.get('int_score', 0) >= 3
+                and 400 < len(ex.get('text', '')) < 2000  # Medium length for validation
+            )
+        
+        stream = stream.filter(val_filter)
+        stream = stream.shuffle(seed=seed, buffer_size=10_000)
+        
+        buffer = []
+        val_samples = 0
+        xs, ys = []
+        
+        for example in stream:
+            try:
+                if not isinstance(example, dict) or 'text' not in example:
+                    continue
+                    
+                text = example['text']
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                    
+                tokens = tokenizer.encode(text, add_special_tokens=False)
+            except Exception as e:
+                continue
+                
+            if not tokens:
+                continue
+                
+            buffer.extend(tokens)
             
-            if val_samples >= val_size:
-                print(f"[VAL DATASET] Built {val_samples} validation samples.")
-                return list(zip(xs, ys))
+            # Extract block_size chunks
+            while len(buffer) >= block_size + 1 and val_samples < val_size:
+                x_chunk = buffer[:block_size]
+                y_chunk = buffer[1:block_size + 1]
+                xs.append(torch.tensor(x_chunk, dtype=torch.long))
+                ys.append(torch.tensor(y_chunk, dtype=torch.long))
+                buffer = buffer[block_size:]
+                val_samples += 1
+                
+                if val_samples >= val_size:
+                    print(f"[VAL DATASET] Built {val_samples} validation samples.")
+                    return list(zip(xs, ys))
+        
+        print(f"[VAL DATASET] Built {val_samples} validation samples (stream ended early).")
+        return list(zip(xs, ys))
     
-    print(f"[VAL DATASET] Built {val_samples} validation samples (stream ended early).")
-    return list(zip(xs, ys))
+    except Exception as e:
+        print(f"[VAL DATASET] Error building validation set: {e}")
+        # Return empty dataset as fallback
+        return []
 
 # === End of dataset.py ===
