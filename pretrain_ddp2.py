@@ -27,7 +27,6 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path="APT/.env")
 
 os.environ["HF_HOME"] = os.getenv("HF_HOME", "/default/path/hf_cache")
-os.environ["TRANSFORMERS_CACHE"] = os.getenv("TRANSFORMERS_CACHE", "/default/path/hf_cache")
 os.environ["HF_DATASETS_CACHE"] = os.getenv("HF_DATASETS_CACHE", "/default/path/hf_cache")
 
 # Project imports

@@ -46,8 +46,7 @@ def filtered_stream(stage, seed, shard_id, num_shards, buffer_size=50_000):
     stream = load_dataset(
         "HuggingFaceFW/fineweb-edu",
         split="train",
-        streaming=True,
-        trust_remote_code=True  # Add this to ensure proper loading
+        streaming=True, # Add this to ensure proper loading
     )
     
     # Apply shuffling first
@@ -185,7 +184,6 @@ def build_val_dataset(tokenizer, block_size, val_size=100, seed=42):
             "HuggingFaceFW/fineweb-edu",
             split="train",
             streaming=True,
-            trust_remote_code=True
         )
         
         # Only keep English and quality examples
