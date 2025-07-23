@@ -32,6 +32,8 @@ from src.model import AnameeModel, count_parameters
 from src.dataset import Curriculum2BTokenDataset, build_val_dataset
 from src.validate import validate
 
+TOKENIZER_PATH = "meta-llama/Llama-2-7b-hf" 
+
 def train_loop(
     model, 
     train_loader, 
@@ -119,6 +121,7 @@ def train_loop(
     pbar_total.close()
     pbar_day.close()
 
+TRAINING_STEPS = 3814 
 def main():
     # --- Parse command line arguments ---
     parser = argparse.ArgumentParser()
@@ -129,7 +132,8 @@ def main():
     parser.add_argument("--log_interval", type=int, default=LOG_INTERVAL)
     parser.add_argument("--val_interval", type=int, default=VAL_INTERVAL)
     parser.add_argument("--val", action="store_true")
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+
 
     # --- Set CUDA device (your A100) ---
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
