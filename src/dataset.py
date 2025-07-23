@@ -69,8 +69,7 @@ def create_streaming_dataset(
         dataset = load_dataset(
             "HuggingFaceFW/fineweb-edu",
             split="train",
-            streaming=True,
-            trust_remote_code=True,  # Required for some datasets
+            streaming=True,  # Required for some datasets
             token=os.getenv("HF_TOKEN"),  # Use token from environment
         )
         
@@ -287,7 +286,6 @@ def build_val_dataset(
             "HuggingFaceFW/fineweb-edu",
             split="train",
             streaming=True,
-            trust_remote_code=True,
             token=os.getenv("HF_TOKEN"),
         )
         
