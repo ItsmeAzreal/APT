@@ -1,69 +1,45 @@
-###############################################################
-#                     REQUIREMENTS.TXT                        #
-#    -- All dependencies for LLM pretraining pipeline --      #
-#      Comments show purpose and if the lib is optional       #
-###############################################################
+# Core PyTorch (install appropriate version for your CUDA)
+torch>=2.1.0
+torchvision
+torchaudio
 
-# === Core PyTorch and Ecosystem ===
-torch               # Core deep learning framework (CPU+GPU)
-torchvision         # Image utilities/models (optional, vision tasks)
-torchaudio          # Audio utilities/models (optional)
+# Hugging Face ecosystem
+transformers>=4.36.0
+datasets>=2.14.0
+tokenizers>=0.15.0
+safetensors>=0.4.0
+huggingface-hub>=0.19.0
 
-# === Training & Experiment Management ===
-tensorboard         # Training visualization/logging dashboard
-tqdm                # Fast, pretty progress bars
+# Training utilities
+tensorboard>=2.14.0
+tqdm>=4.66.0
+accelerate>=0.24.0
 
-# === GPU, Performance, and Advanced DL ===
-pynvml              # GPU monitoring (VRAM usage, status)
-flash-attn          # Ultra-fast transformer attention kernels (optional for LLMs, only works on some GPUs)
-bitsandbytes        # 8-bit (and 4-bit) optimizers/quantization (optional, for speed/memory savings)
+# Performance optimization
+flash-attn>=2.3.0  # For A100 - requires CUDA 11.6+
+bitsandbytes>=0.41.0
+einops>=0.7.0
 
-# === Hugging Face + NLP Ecosystem ===
-transformers        # Hugging Face models, pipelines, tokenizers
-datasets            # Hugging Face datasets (streaming/loading)
-accelerate          # Easy multi-GPU/TPU setup (useful for DDP or FSDP)
-safetensors         # Fast, secure model checkpoints
-sentencepiece       # Tokenizer (required for some models/datasets)
-huggingface-hub     # Upload/download models/datasets from Hugging Face Hub
+# Data processing
+numpy>=1.24.0
+pandas>=2.0.0
+pyarrow>=14.0.0  # For efficient dataset loading
 
-# === Data Science & Visualization ===
-numpy               # General math and array library
-matplotlib          # Visualization/plotting
-scikit-learn        # Classic ML utilities, metrics, splitting, etc.
-pandas              # DataFrames, CSVs, tabular data
-seaborn             # Statistical data visualization
+# System monitoring
+pynvml>=11.5.0
+psutil>=5.9.0
 
-# === Image Processing (optional) ===
-opencv-python       # Computer vision/image utilities (optional)
-Pillow              # Image loading/saving (optional)
+# Configuration
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
 
-# === Diffusion/Generative Models (optional) ===
-diffusers           # Diffusion models (Stable Diffusion, etc.)
+# Utilities
+rich>=13.5.0  # Better console output
+wandb>=0.15.0  # Optional: for experiment tracking
+sentencepiece>=0.1.99  # For some tokenizers
 
-# === Utility/Helpers ===
-einops              # Clean tensor reshaping and manipulation
-python-dotenv       # Load secret/config variables from .env file
-requests            # For HTTP/API downloads and web queries
-
-# === Interactive Notebooks (optional) ===
-# jupyterlab        # JupyterLab notebooks (for prototyping)
-# ipywidgets        # Rich interactive widgets (for notebooks)
-
-# === Extra: YAML Configs (optional, if you use .yaml for configs) ===
-# pyyaml
-
-# === Data Compression (optional, for huge datasets) ===
-# zstandard
-# lz4
-
-# === Nice CLI Logging (optional, for better logs) ===
-# rich
-
-# === RunPod CLI (optional, for job automation with RunPod) ===
-# runpod-python     # See: https://github.com/runpod/runpod-python
-
-###############################################################
-# Standard library modules (os, argparse, pathlib, etc.)
-# do NOT go in requirements.txt (Python always has these)
-###############################################################
-
+# Development tools (optional)
+ipython>=8.12.0
+jupyter>=1.0.0
+black>=23.0.0
+pylint>=2.17.0
