@@ -69,10 +69,10 @@ BATCH_SIZE=64  # Conservative for A100 40GB
 # Determine training command based on GPU count
 if [ $NUM_GPUS -eq 1 ]; then
     echo -e "${BLUE}Starting single-GPU training on A100...${NC}"
-    CMD="python pretrain.py --batch_size $BATCH_SIZE $RESUME_CKPT"
+    CMD="python pretrain_ddp.py --batch_size $BATCH_SIZE $RESUME_CKPT"
 else
     echo -e "${BLUE}Starting multi-GPU training on $NUM_GPUS GPUs...${NC}"
-    CMD="torchrun --nproc_per_node=$NUM_GPUS --master_port=12355 pretrain.py --batch_size $BATCH_SIZE $RESUME_CKPT"
+    CMD="torchrun --nproc_per_node=$NUM_GPUS --master_port=12355 pretrain_ddp.py --batch_size $BATCH_SIZE $RESUME_CKPT"
 fi
 
 # Log file with timestamp

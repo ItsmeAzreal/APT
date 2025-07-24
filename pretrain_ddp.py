@@ -1,7 +1,8 @@
-# pretrain.py - Fixed unified training script for 3B tokens on A100
+# pretrain_ddp.py - Fixed unified training script with proper GPU utilization
 
 """
-Unified Pretraining Script for A100
+Fixed Pretraining Script for A100
+- Ensures GPU utilization by proper data movement
 - Supports both single GPU and multi-GPU training
 - 3B token curriculum learning with 500M daily targets
 - Robust error handling and checkpointing
@@ -70,6 +71,44 @@ def is_main_process():
     """Check if current process is the main process"""
     return not dist.is_initialized() or dist.get_rank() == 0
 
+# ========================= GPU Verification =========================
+
+def verify_gpu_setup(model: nn.Module, device: torch.device):
+    """Verify that model and data are on GPU"""
+    logger.info("=" * 60)
+    logger.info("GPU SETUP VERIFICATION")
+    logger.info("=" * 60)
+    
+    # Check CUDA availability
+    logger.info(f"CUDA available: {torch.cuda.is_available()}")
+    logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+    
+    if torch.cuda.is_available():
+        logger.info(f"Current device: {torch.cuda.current_device()}")
+        logger.info(f"Device name: {torch.cuda.get_device_name()}")
+        
+        # Check memory
+        allocated = torch.cuda.memory_allocated(device) / 1e9
+        reserved = torch.cuda.memory_reserved(device) / 1e9
+        logger.info(f"GPU memory allocated: {allocated:.2f} GB")
+        logger.info(f"GPU memory reserved: {reserved:.2f} GB")
+    
+    # Check model device
+    model_device = next(model.parameters()).device
+    logger.info(f"Model is on: {model_device}")
+    
+    # Test forward pass
+    logger.info("Testing GPU forward pass...")
+    test_input = torch.randint(0, 32000, (2, 128), device=device)
+    logger.info(f"Test input device: {test_input.device}")
+    
+    with torch.no_grad():
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            test_output = model(test_input)
+    
+    logger.info("✓ GPU forward pass successful")
+    logger.info("=" * 60)
+
 # ========================= Progress Tracking =========================
 
 class ProgressTracker:
@@ -131,7 +170,11 @@ def train(
     rank: int = 0,
     world_size: int = 1
 ):
-    """Main training loop with comprehensive monitoring"""
+    """Main training loop with comprehensive monitoring and GPU verification"""
+    
+    # Verify GPU setup at start
+    if is_main_process():
+        verify_gpu_setup(model, device)
     
     # Initialize tracking
     progress_tracker = ProgressTracker(
@@ -148,6 +191,10 @@ def train(
     best_val_loss = float('inf')
     running_loss = 0.0
     grad_norms = []
+    
+    # GPU monitoring
+    gpu_check_interval = 100  # Check every 100 steps
+    last_gpu_check = 0
     
     # Progress bars (main process only)
     if is_main_process():
@@ -169,9 +216,22 @@ def train(
     # Training loop
     while step < config['total_steps']:
         for batch_idx, (input_ids, labels) in enumerate(train_loader):
-            # Move to device
+            # Convert to tensors if they're numpy arrays
+            if isinstance(input_ids, np.ndarray):
+                input_ids = torch.from_numpy(input_ids).long()
+            if isinstance(labels, np.ndarray):
+                labels = torch.from_numpy(labels).long()
+            
+            # Move to device and verify
             input_ids = input_ids.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
+            
+            # GPU check
+            if step - last_gpu_check >= gpu_check_interval and is_main_process():
+                logger.info(f"[Step {step}] Input device: {input_ids.device}, Model device: {next(model.parameters()).device}")
+                gpu_util = torch.cuda.utilization(device)
+                logger.info(f"[Step {step}] GPU utilization: {gpu_util}%")
+                last_gpu_check = step
             
             # Update token count
             batch_tokens = input_ids.numel()
@@ -224,12 +284,19 @@ def train(
                 stats['grad_norm'] = avg_grad_norm
                 stats['learning_rate'] = scheduler.get_last_lr()[0]
                 
+                # GPU memory stats
+                if torch.cuda.is_available():
+                    stats['gpu_memory_allocated'] = torch.cuda.memory_allocated(device) / 1e9
+                    stats['gpu_memory_reserved'] = torch.cuda.memory_reserved(device) / 1e9
+                    stats['gpu_utilization'] = torch.cuda.utilization(device)
+                
                 # Log to console
                 logger.info(
                     f"Step {step + 1} | Day {stats['current_day']} | "
                     f"Progress: {stats['total_progress']:.1f}% | "
                     f"Loss: {avg_loss:.4f} | LR: {stats['learning_rate']:.2e} | "
-                    f"Speed: {stats['tokens_per_sec']:.0f} tok/s"
+                    f"Speed: {stats['tokens_per_sec']:.0f} tok/s | "
+                    f"GPU: {stats.get('gpu_utilization', 0)}%"
                 )
                 
                 # Log to TensorBoard
@@ -240,6 +307,8 @@ def train(
                     writer.add_scalar('train/tokens_per_second', stats['tokens_per_sec'], step + 1)
                     writer.add_scalar('progress/total_percent', stats['total_progress'], step + 1)
                     writer.add_scalar('progress/day', stats['current_day'], step + 1)
+                    writer.add_scalar('gpu/memory_allocated_gb', stats.get('gpu_memory_allocated', 0), step + 1)
+                    writer.add_scalar('gpu/utilization_percent', stats.get('gpu_utilization', 0), step + 1)
                 
                 # Save progress
                 progress_tracker.save_progress(stats)
@@ -301,7 +370,8 @@ def train(
                 
                 # Check for day transition
                 new_day = (tokens_seen // config['daily_tokens']) + 1
-                if new_day > stats['current_day']:
+                current_day = ((tokens_seen - batch_tokens * world_size) // config['daily_tokens']) + 1
+                if new_day > current_day:
                     pbar_daily.close()
                     pbar_daily = tqdm(
                         total=config['daily_steps'],
@@ -343,6 +413,11 @@ def main():
     # Set random seeds
     torch.manual_seed(SEED + args.rank)
     torch.cuda.manual_seed_all(SEED + args.rank)
+    
+    # Verify CUDA setup
+    if not torch.cuda.is_available():
+        logger.error("CUDA is not available! Training will be extremely slow on CPU.")
+        sys.exit(1)
     
     # Initialize tokenizer
     logger.info(f"Loading tokenizer: {TOKENIZER_NAME}")
@@ -389,12 +464,22 @@ def main():
         cache_dir=HF_CACHE_DIR
     )
     
+    # Custom collate function to ensure GPU tensors
+    def collate_fn(batch):
+        # batch is a list of (x, y) numpy arrays
+        xs, ys = zip(*batch)
+        # Stack into tensors
+        input_ids = torch.stack([torch.from_numpy(x).long() for x in xs])
+        labels = torch.stack([torch.from_numpy(y).long() for y in ys])
+        return input_ids, labels
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         num_workers=NUM_WORKERS,
         pin_memory=True,
-        persistent_workers=(NUM_WORKERS > 0)
+        persistent_workers=(NUM_WORKERS > 0),
+        collate_fn=collate_fn
     )
     
     # Validation dataset (main process only)
@@ -521,4 +606,6 @@ def main():
         logger.info(f"Final model saved at {final_path}")
 
 if __name__ == "__main__":
+    # Add numpy import at the top
+    import numpy as np
     main()

@@ -1,7 +1,8 @@
-# src/dataset.py - Fixed streaming dataset with proper authentication and error handling
+# src/dataset.py - Fixed streaming dataset with proper authentication and GPU compatibility
 
 import os
 import torch
+import numpy as np
 from datasets import load_dataset
 from typing import Iterator, Tuple, Optional, Dict, Any
 import time
@@ -69,8 +70,8 @@ def create_streaming_dataset(
         dataset = load_dataset(
             "HuggingFaceFW/fineweb-edu",
             split="train",
-            streaming=True,  # Required for some datasets
-            token=os.getenv("HF_TOKEN"),  # Use token from environment
+            streaming=True,
+            token=os.getenv("HF_TOKEN"),
         )
         
         # Apply shuffling with different seed per shard
@@ -93,6 +94,7 @@ def create_streaming_dataset(
 class Curriculum2BTokenDataset(IterableDataset):
     """
     Streaming dataset for curriculum-based LLM pretraining.
+    - Returns numpy arrays instead of tensors for proper GPU transfer
     - Properly handles sharding across GPUs
     - Includes error recovery and retry logic
     - Tracks progress accurately
@@ -174,8 +176,8 @@ class Curriculum2BTokenDataset(IterableDataset):
                     logger.error(f"[Rank {self.shard_id}] Failed to create dataset after {self.max_retries} attempts")
                     raise
 
-    def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
-        """Main iteration with proper sharding and error recovery"""
+    def __iter__(self) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+        """Main iteration returning numpy arrays for proper GPU transfer"""
         stages = [
             ('easy', self.easy_token_target),
             ('hard', self.hard_token_target)
@@ -219,10 +221,10 @@ class Curriculum2BTokenDataset(IterableDataset):
 
                 # Yield complete blocks
                 while len(buffer) >= self.block_size + 1:
-                    # Create input and target sequences
+                    # Create input and target sequences as numpy arrays
                     chunk = buffer[:self.block_size + 1]
-                    x = torch.tensor(chunk[:-1], dtype=torch.long)
-                    y = torch.tensor(chunk[1:], dtype=torch.long)
+                    x = np.array(chunk[:-1], dtype=np.int64)
+                    y = np.array(chunk[1:], dtype=np.int64)
                     yield x, y
                     
                     # Slide window by half block for better coverage
@@ -273,7 +275,7 @@ def build_val_dataset(
 ) -> list:
     """
     Build a fixed validation dataset with proper error handling.
-    Returns a list of (input_ids, labels) tensor pairs.
+    Returns a list of (input_ids, labels) numpy array pairs.
     """
     logger.info(f"Building validation dataset with {val_size} samples...")
     
@@ -353,5 +355,4 @@ def build_val_dataset(
     
     except Exception as e:
         logger.error(f"Failed to build validation dataset: {e}")
-        # Return empty list as fallback
         return []

@@ -1,8 +1,7 @@
-# src/validate.py - Fixed validation function with proper error handling
+# src/validate.py - Fixed validation function with correct autocast API
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast
 from tqdm import tqdm
 from typing import Optional
 import logging
@@ -60,14 +59,27 @@ def validate(
             labels = labels.to(device, non_blocking=True)
             
             # Forward pass with mixed precision
-            with autocast(device_type=device.type, dtype=autocast_dtype):
+            if device.type == 'cuda':
+                with torch.cuda.amp.autocast(dtype=autocast_dtype):
+                    outputs = model(input_ids, labels=labels)
+                    
+                    # Handle different output formats
+                    if hasattr(outputs, 'loss'):
+                        loss = outputs.loss
+                    else:
+                        # Compute loss manually if not provided
+                        logits = outputs
+                        loss = nn.functional.cross_entropy(
+                            logits.view(-1, logits.size(-1)),
+                            labels.view(-1),
+                            ignore_index=-100
+                        )
+            else:
+                # CPU doesn't use autocast
                 outputs = model(input_ids, labels=labels)
-                
-                # Handle different output formats
                 if hasattr(outputs, 'loss'):
                     loss = outputs.loss
                 else:
-                    # Compute loss manually if not provided
                     logits = outputs
                     loss = nn.functional.cross_entropy(
                         logits.view(-1, logits.size(-1)),
