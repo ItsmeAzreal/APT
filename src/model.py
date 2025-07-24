@@ -1,10 +1,11 @@
-# src/model.py - Fixed model with proper initialization and flash attention support
+# src/model.py - Lightning-120M Ultra-Efficient Architecture
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
+from dataclasses import dataclass
 
 # Try to import flash attention
 try:
@@ -12,10 +13,26 @@ try:
     FLASH_AVAILABLE = True
 except ImportError:
     FLASH_AVAILABLE = False
-    print("Flash Attention not available, using PyTorch native attention")
+
+@dataclass
+class LightningConfig:
+    """Configuration for Lightning model"""
+    vocab_size: int = 32768
+    dim: int = 768
+    num_heads: int = 12
+    num_kv_heads: int = 3
+    hidden_dim: int = 2688
+    num_layers: int = 18
+    max_seq_len: int = 4096
+    rope_scaling_factor: float = 2.0
+    activation: str = "swish"
+    dropout: float = 0.0
+    embedding_dropout: float = 0.1
+    use_checkpoint: bool = True
+    checkpoint_layers: list = None
 
 class RMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization"""
+    """Root Mean Square Layer Normalization - faster than LayerNorm"""
     def __init__(self, dim: int, eps: float = 1e-8):
         super().__init__()
         self.eps = eps
@@ -25,188 +42,199 @@ class RMSNorm(nn.Module):
         rms = x.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
         return x / rms * self.scale
 
-def apply_rope(q: torch.Tensor, k: torch.Tensor, base: int = 10000) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Apply Rotary Position Embeddings to query and key tensors"""
-    B, nh, T, hd = q.size()
-    device = q.device
+class RotaryPositionEmbedding(nn.Module):
+    """Rotary Position Embeddings with scaling support"""
+    def __init__(self, dim: int, max_seq_len: int = 4096, base: int = 10000, scaling_factor: float = 1.0):
+        super().__init__()
+        self.dim = dim
+        self.max_seq_len = max_seq_len
+        self.base = base
+        self.scaling_factor = scaling_factor
+        
+        # Precompute frequencies
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
+        self.register_buffer('inv_freq', inv_freq)
+        
+        # Precompute position indices
+        positions = torch.arange(max_seq_len).float()
+        if scaling_factor != 1.0:
+            positions = positions / scaling_factor
+        freqs = torch.outer(positions, self.inv_freq)
+        
+        self.register_buffer('cos_cached', freqs.cos())
+        self.register_buffer('sin_cached', freqs.sin())
     
-    # Create position indices
-    pos = torch.arange(T, device=device, dtype=q.dtype)
-    
-    # Create frequency bands
-    freq_seq = torch.arange(0, hd, 2, device=device, dtype=q.dtype)
-    inv_freq = 1.0 / (base ** (freq_seq / hd))
-    
-    # Create sinusoidal embeddings
-    sinusoid_inp = torch.outer(pos, inv_freq)
-    sin = sinusoid_inp.sin()[None, None, :, :]
-    cos = sinusoid_inp.cos()[None, None, :, :]
+    def forward(self, x: torch.Tensor, seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
+
+def apply_rotary_embeddings(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Apply rotary embeddings to query and key tensors"""
+    # Reshape for rotary embeddings
+    q_rot = q.reshape(*q.shape[:-1], -1, 2)
+    k_rot = k.reshape(*k.shape[:-1], -1, 2)
     
     # Apply rotation
-    q1, q2 = q[..., ::2], q[..., 1::2]
-    k1, k2 = k[..., ::2], k[..., 1::2]
+    cos = cos.unsqueeze(0).unsqueeze(0)
+    sin = sin.unsqueeze(0).unsqueeze(0)
     
-    q_rope = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
-    k_rope = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
+    q_out = torch.stack([
+        q_rot[..., 0] * cos - q_rot[..., 1] * sin,
+        q_rot[..., 0] * sin + q_rot[..., 1] * cos
+    ], dim=-1).flatten(-2)
     
-    return q_rope, k_rope
+    k_out = torch.stack([
+        k_rot[..., 0] * cos - k_rot[..., 1] * sin,
+        k_rot[..., 0] * sin + k_rot[..., 1] * cos
+    ], dim=-1).flatten(-2)
+    
+    return q_out, k_out
 
-class GroupedQueryAttention(nn.Module):
-    """Multi-head attention with grouped query attention support"""
-    def __init__(self, dim: int, num_heads: int, num_kv_heads: int, dropout: float = 0.0):
+class LightningAttention(nn.Module):
+    """Ultra-efficient attention with aggressive GQA compression"""
+    def __init__(self, config: LightningConfig):
         super().__init__()
-        assert dim % num_heads == 0
-        
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = dim // num_heads
+        self.num_heads = config.num_heads
+        self.num_kv_heads = config.num_kv_heads
+        self.head_dim = config.dim // config.num_heads
         self.scale = self.head_dim ** -0.5
         
-        # GQA: separate projections for Q, K, V
-        self.q_proj = nn.Linear(dim, dim, bias=False)
-        self.k_proj = nn.Linear(dim, num_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(dim, num_kv_heads * self.head_dim, bias=False)
-        self.out_proj = nn.Linear(dim, dim, bias=False)
+        # Projections
+        self.q_proj = nn.Linear(config.dim, config.dim, bias=False)
+        self.k_proj = nn.Linear(config.dim, config.num_kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(config.dim, config.num_kv_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
         
-        self.dropout = dropout
-        self.use_flash = FLASH_AVAILABLE and dropout == 0.0  # Flash attn doesn't support dropout during inference
+        # Rotary embeddings
+        self.rotary = RotaryPositionEmbedding(
+            self.head_dim, 
+            config.max_seq_len, 
+            scaling_factor=config.rope_scaling_factor
+        )
+        
+        self.dropout = config.dropout
+        self.use_flash = FLASH_AVAILABLE and config.dropout == 0.0
     
-    def forward(self, x: torch.Tensor, use_cache: bool = False, past_kv: Optional[Tuple] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, C = x.shape
         
-        # Project to Q, K, V
+        # Compute Q, K, V
         q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
         
-        # Apply RoPE
-        q, k = apply_rope(q, k)
+        # Apply rotary embeddings
+        cos, sin = self.rotary(x, T)
+        q, k = apply_rotary_embeddings(q, k, cos, sin)
         
-        # Expand K, V for GQA if needed
+        # Repeat K,V for grouped query attention
         if self.num_kv_heads < self.num_heads:
-            k = k.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
-            v = v.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+            repeat_factor = self.num_heads // self.num_kv_heads
+            k = k.repeat_interleave(repeat_factor, dim=1)
+            v = v.repeat_interleave(repeat_factor, dim=1)
         
-        # Apply attention
+        # Attention computation
         if self.use_flash and self.training:
-            # Flash attention expects (B, T, nh, hd) format
+            # Use Flash Attention
             q = q.transpose(1, 2)
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
             out = flash_attn_func(q, k, v, dropout_p=self.dropout, causal=True)
             out = out.view(B, T, C)
         else:
-            # PyTorch native attention
+            # Standard attention with memory optimization
             out = F.scaled_dot_product_attention(
-                q, k, v, 
+                q, k, v,
+                attn_mask=mask,
                 dropout_p=self.dropout if self.training else 0.0,
-                is_causal=True
+                is_causal=True,
+                scale=self.scale
             )
             out = out.transpose(1, 2).contiguous().view(B, T, C)
         
-        return self.out_proj(out)
+        return self.o_proj(out)
 
-class FeedForward(nn.Module):
-    """SwiGLU feed-forward network"""
-    def __init__(self, dim: int, hidden_dim: int, dropout: float = 0.0):
+class LightningFFN(nn.Module):
+    """Optimized FFN with Swish activation"""
+    def __init__(self, config: LightningConfig):
         super().__init__()
-        self.fc1 = nn.Linear(dim, hidden_dim * 2, bias=False)
-        self.fc2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.dropout = nn.Dropout(dropout)
+        self.gate_proj = nn.Linear(config.dim, config.hidden_dim, bias=False)
+        self.up_proj = nn.Linear(config.dim, config.hidden_dim, bias=False)
+        self.down_proj = nn.Linear(config.hidden_dim, config.dim, bias=False)
+        self.dropout = nn.Dropout(config.dropout)
+        self.activation = config.activation
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_proj, x_gate = self.fc1(x).chunk(2, dim=-1)
-        x = F.silu(x_proj) * x_gate
-        x = self.fc2(x)
+        if self.activation == "swish":
+            gate = F.silu(self.gate_proj(x))
+        else:
+            gate = F.gelu(self.gate_proj(x))
+        
+        up = self.up_proj(x)
+        x = gate * up
+        x = self.down_proj(x)
         return self.dropout(x)
 
-class TransformerBlock(nn.Module):
-    """Transformer block with pre-normalization"""
-    def __init__(
-        self, 
-        dim: int, 
-        num_heads: int, 
-        hidden_dim: int, 
-        num_kv_heads: int, 
-        dropout: float = 0.0,
-        use_checkpoint: bool = False
-    ):
+class LightningBlock(nn.Module):
+    """Transformer block optimized for efficiency"""
+    def __init__(self, config: LightningConfig, layer_idx: int):
         super().__init__()
-        self.ln1 = RMSNorm(dim)
-        self.attn = GroupedQueryAttention(dim, num_heads, num_kv_heads, dropout)
-        self.ln2 = RMSNorm(dim)
-        self.ff = FeedForward(dim, hidden_dim, dropout)
-        self.dropout = nn.Dropout(dropout)
-        self.use_checkpoint = use_checkpoint
+        self.attention_norm = RMSNorm(config.dim)
+        self.attention = LightningAttention(config)
+        self.ffn_norm = RMSNorm(config.dim)
+        self.ffn = LightningFFN(config)
+        self.layer_idx = layer_idx
+        
+        # Gradient checkpointing for specific layers
+        self.use_checkpoint = (
+            config.use_checkpoint and 
+            config.checkpoint_layers and 
+            layer_idx in config.checkpoint_layers
+        )
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Attention block
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Attention block with residual
         residual = x
-        x = self.ln1(x)
-        x = self.attn(x)
-        x = self.dropout(x)
+        x = self.attention_norm(x)
+        x = self.attention(x, mask)
         x = residual + x
         
-        # Feedforward block
+        # FFN block with residual
         residual = x
-        x = self.ln2(x)
-        x = self.ff(x)
+        x = self.ffn_norm(x)
+        x = self.ffn(x)
         x = residual + x
         
         return x
 
-class AnameeModel(nn.Module):
-    """Main language model with proper initialization"""
-    def __init__(
-        self,
-        vocab_size: int = 32000,
-        dim: int = 640,
-        num_heads: int = 10,
-        hidden_dim: int = 2560,
-        num_layers: int = 24,
-        num_kv_heads: int = 4,
-        max_seq_len: int = 2048,
-        dropout: float = 0.0,
-        use_checkpoint: bool = True,
-        checkpoint_start_layer: int = 8
-    ):
+class LightningModel(nn.Module):
+    """Lightning-120M: Ultra-efficient language model"""
+    def __init__(self, config: LightningConfig):
         super().__init__()
+        self.config = config
         
-        # Store config
-        self.vocab_size = vocab_size
-        self.dim = dim
-        self.num_heads = num_heads
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.num_kv_heads = num_kv_heads
-        self.max_seq_len = max_seq_len
-        
-        # Token embeddings
-        self.token_embedding = nn.Embedding(vocab_size, dim)
-        self.dropout = nn.Dropout(dropout)
+        # Token embeddings with special initialization
+        self.token_embedding = nn.Embedding(config.vocab_size, config.dim)
+        self.embedding_dropout = nn.Dropout(config.embedding_dropout)
         
         # Transformer blocks
         self.layers = nn.ModuleList([
-            TransformerBlock(
-                dim, 
-                num_heads, 
-                hidden_dim, 
-                num_kv_heads, 
-                dropout,
-                use_checkpoint=(use_checkpoint and i >= checkpoint_start_layer)
-            )
-            for i in range(num_layers)
+            LightningBlock(config, i) for i in range(config.num_layers)
         ])
         
         # Output
-        self.ln_f = RMSNorm(dim)
-        self.lm_head = nn.Linear(dim, vocab_size, bias=False)
+        self.ln_f = RMSNorm(config.dim)
+        self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
         
         # Weight tying
         self.token_embedding.weight = self.lm_head.weight
         
         # Initialize weights
         self.apply(self._init_weights)
+        
+        # Apply special scaled initialization for stability
+        for pn, p in self.named_parameters():
+            if 'o_proj.weight' in pn or 'down_proj.weight' in pn:
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.num_layers))
     
     def _init_weights(self, module):
         """Initialize weights with scaled normal distribution"""
@@ -221,22 +249,21 @@ class AnameeModel(nn.Module):
         self, 
         input_ids: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
-        use_cache: bool = False
+        mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Forward pass with optional loss calculation"""
         B, T = input_ids.shape
-        assert T <= self.max_seq_len, f"Sequence length {T} exceeds maximum {self.max_seq_len}"
         
         # Token embeddings
         x = self.token_embedding(input_ids)
-        x = self.dropout(x)
+        x = self.embedding_dropout(x)
         
         # Transformer blocks
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             if layer.use_checkpoint and self.training:
-                x = torch.utils.checkpoint.checkpoint(layer, x)
+                x = torch.utils.checkpoint.checkpoint(layer, x, mask)
             else:
-                x = layer(x)
+                x = layer(x, mask)
         
         # Output projection
         x = self.ln_f(x)
@@ -263,8 +290,32 @@ class AnameeModel(nn.Module):
         
         return logits
 
+def create_lightning_model(
+    vocab_size: int = 32768,
+    dim: int = 768,
+    num_heads: int = 12,
+    num_kv_heads: int = 3,
+    hidden_dim: int = 2688,
+    num_layers: int = 18,
+    max_seq_len: int = 4096,
+    **kwargs
+) -> LightningModel:
+    """Create Lightning model with specified configuration"""
+    config = LightningConfig(
+        vocab_size=vocab_size,
+        dim=dim,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        max_seq_len=max_seq_len,
+        checkpoint_layers=list(range(6, 18, 3)),
+        **kwargs
+    )
+    return LightningModel(config)
+
 def count_parameters(model: nn.Module) -> int:
-    """Count trainable parameters in model"""
+    """Count trainable parameters"""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def model_size_mb(model: nn.Module) -> float:
@@ -272,3 +323,6 @@ def model_size_mb(model: nn.Module) -> float:
     param_size = sum(p.numel() * p.element_size() for p in model.parameters())
     buffer_size = sum(b.numel() * b.element_size() for b in model.buffers())
     return (param_size + buffer_size) / 1024 / 1024
+
+# Alias for compatibility
+AnameeModel = create_lightning_model

@@ -1,10 +1,11 @@
-# src/validate.py - Fixed validation function with correct autocast API
+# src/validate.py - Fixed validation function with proper autocast and batch handling
 
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 from typing import Optional
 import logging
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,8 @@ def validate(
         val_loader, 
         total=val_steps if val_steps else len(val_loader),
         desc="Validation",
-        leave=False
+        leave=False,
+        disable=not logger.isEnabledFor(logging.INFO)
     )
     
     try:
@@ -53,6 +55,12 @@ def validate(
             else:
                 logger.error(f"Unexpected batch format: {type(batch)}")
                 continue
+            
+            # Convert numpy arrays to tensors if needed
+            if isinstance(input_ids, np.ndarray):
+                input_ids = torch.from_numpy(input_ids).long()
+            if isinstance(labels, np.ndarray):
+                labels = torch.from_numpy(labels).long()
             
             # Move to device
             input_ids = input_ids.to(device, non_blocking=True)

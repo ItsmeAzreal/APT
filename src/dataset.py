@@ -1,10 +1,10 @@
-# src/dataset.py - Fixed streaming dataset with proper authentication and GPU compatibility
+# src/dataset.py - Fixed streaming dataset with proper sliding window and consistent types
 
 import os
 import torch
 import numpy as np
 from datasets import load_dataset
-from typing import Iterator, Tuple, Optional, Dict, Any
+from typing import Iterator, Tuple, Optional, Dict, Any, List
 import time
 from torch.utils.data import IterableDataset
 import logging
@@ -27,6 +27,17 @@ def easy_filter(example: Dict[str, Any]) -> bool:
             example.get('language', '') == 'en'
             and example.get('int_score', 0) >= 3
             and 0 < len(example.get('text', '')) < 400
+        )
+    except:
+        return False
+    
+def medium_filter(example: Dict[str, Any]) -> bool:
+    """Filter for 'medium' phase"""
+    try:
+        return (
+            example.get('language', '') == 'en'
+            and example.get('int_score', 0) >= 3
+            and 400 <= len(example.get('text', '')) <= 800
         )
     except:
         return False
@@ -54,7 +65,8 @@ def create_streaming_dataset(
     seed: int, 
     shard_id: int, 
     num_shards: int,
-    cache_dir: Optional[str] = None
+    cache_dir: Optional[str] = None,
+    buffer_size: int = 50000
 ):
     """
     Creates a properly authenticated and sharded streaming dataset.
@@ -74,12 +86,16 @@ def create_streaming_dataset(
             token=os.getenv("HF_TOKEN"),
         )
         
-        # Apply shuffling with different seed per shard
-        dataset = dataset.shuffle(seed=seed + shard_id, buffer_size=10_000)
+        # Apply shuffling with different seed per shard and larger buffer
+        dataset = dataset.shuffle(seed=seed + shard_id, buffer_size=buffer_size)
         
         # Apply stage-specific filter
         if stage == 'easy':
             dataset = dataset.filter(easy_filter)
+            
+        elif stage == 'medium':
+            dataset = dataset.filter(medium_filter)
+    
         elif stage == 'hard':
             dataset = dataset.filter(hard_filter)
         else:
@@ -94,27 +110,31 @@ def create_streaming_dataset(
 class Curriculum2BTokenDataset(IterableDataset):
     """
     Streaming dataset for curriculum-based LLM pretraining.
-    - Returns numpy arrays instead of tensors for proper GPU transfer
+    - Returns numpy arrays for consistent GPU transfer
     - Properly handles sharding across GPUs
     - Includes error recovery and retry logic
-    - Tracks progress accurately
+    - Better sliding window to avoid excessive overlap
     """
     def __init__(
         self, 
         tokenizer,
         block_size: int = 2048,
         easy_token_target: int = 1_800_000_000,
+        medium_token_target: int = 1_050_000_000,
         hard_token_target: int = 1_200_000_000,
         seed: int = 42,
         shard_id: int = 0,
         num_shards: int = 1,
         cache_dir: Optional[str] = None,
         max_retries: int = 3,
-        retry_delay: float = 5.0
+        retry_delay: float = 5.0,
+        buffer_size: int = 50000,
+        window_overlap: float = 0.1  # 10% overlap between windows
     ):
         self.tokenizer = tokenizer
         self.block_size = block_size
         self.easy_token_target = easy_token_target // num_shards
+        self.medium_token_target = medium_token_target // num_shards
         self.hard_token_target = hard_token_target // num_shards
         self.seed = seed
         self.shard_id = shard_id
@@ -122,6 +142,8 @@ class Curriculum2BTokenDataset(IterableDataset):
         self.cache_dir = cache_dir or os.getenv("HF_DATASETS_CACHE")
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.buffer_size = buffer_size
+        self.window_slide = int(block_size * (1 - window_overlap))  # Slide by 90% of block size
         
         # Add special tokens if not present
         if self.tokenizer.pad_token is None:
@@ -132,9 +154,11 @@ class Curriculum2BTokenDataset(IterableDataset):
         logger.info(f"  - Hard tokens per shard: {self.hard_token_target:,}")
         logger.info(f"  - Total tokens per shard: {self.easy_token_target + self.hard_token_target:,}")
         logger.info(f"  - Block size: {block_size}")
+        logger.info(f"  - Window slide: {self.window_slide} ({window_overlap*100:.0f}% overlap)")
+        logger.info(f"  - Buffer size: {buffer_size:,}")
         logger.info(f"  - Cache directory: {self.cache_dir}")
 
-    def _process_example(self, example: Dict[str, Any]) -> Optional[list]:
+    def _process_example(self, example: Dict[str, Any]) -> Optional[List[int]]:
         """Process a single example with error handling"""
         try:
             if not isinstance(example, dict) or 'text' not in example:
@@ -163,7 +187,8 @@ class Curriculum2BTokenDataset(IterableDataset):
         for attempt in range(self.max_retries):
             try:
                 return create_streaming_dataset(
-                    stage, self.seed, self.shard_id, self.num_shards, self.cache_dir
+                    stage, self.seed, self.shard_id, self.num_shards, 
+                    self.cache_dir, self.buffer_size
                 )
             except Exception as e:
                 if attempt < self.max_retries - 1:
@@ -180,6 +205,7 @@ class Curriculum2BTokenDataset(IterableDataset):
         """Main iteration returning numpy arrays for proper GPU transfer"""
         stages = [
             ('easy', self.easy_token_target),
+            ('medium', self.medium_token_target),
             ('hard', self.hard_token_target)
         ]
         
@@ -219,7 +245,7 @@ class Curriculum2BTokenDataset(IterableDataset):
                 examples_processed += 1
                 stage_examples += 1
 
-                # Yield complete blocks
+                # Yield complete blocks with proper sliding window
                 while len(buffer) >= self.block_size + 1:
                     # Create input and target sequences as numpy arrays
                     chunk = buffer[:self.block_size + 1]
@@ -227,8 +253,8 @@ class Curriculum2BTokenDataset(IterableDataset):
                     y = np.array(chunk[1:], dtype=np.int64)
                     yield x, y
                     
-                    # Slide window by half block for better coverage
-                    buffer = buffer[self.block_size // 2:]
+                    # Slide window by configured amount (default 90% of block size)
+                    buffer = buffer[self.window_slide:]
                 
                 # Progress reporting
                 current_time = time.time()
@@ -272,10 +298,10 @@ def build_val_dataset(
     val_size: int = 100,
     seed: int = 42,
     cache_dir: Optional[str] = None
-) -> list:
+) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
     Build a fixed validation dataset with proper error handling.
-    Returns a list of (input_ids, labels) numpy array pairs.
+    Returns a list of (input_ids, labels) numpy array pairs for consistency.
     """
     logger.info(f"Building validation dataset with {val_size} samples...")
     
@@ -335,13 +361,14 @@ def build_val_dataset(
                 buffer.extend(tokens)
                 examples_processed += 1
                 
-                # Extract validation samples
+                # Extract validation samples with minimal overlap
                 while len(buffer) >= block_size + 1 and len(val_samples) < val_size:
                     chunk = buffer[:block_size + 1]
-                    x = torch.tensor(chunk[:-1], dtype=torch.long)
-                    y = torch.tensor(chunk[1:], dtype=torch.long)
+                    # Return numpy arrays for consistency with training dataset
+                    x = np.array(chunk[:-1], dtype=np.int64)
+                    y = np.array(chunk[1:], dtype=np.int64)
                     val_samples.append((x, y))
-                    buffer = buffer[block_size // 2:]  # Slide by half
+                    buffer = buffer[block_size:]  # No overlap for validation
                 
                 if len(val_samples) >= val_size:
                     break

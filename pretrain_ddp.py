@@ -27,6 +27,9 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from transformers import LlamaTokenizer, get_cosine_schedule_with_warmup
 from tqdm import tqdm
+from config import ACTIVATION
+from config import USE_ROPE_SCALING, ROPE_SCALING_FACTOR
+from config import GRADIENT_CHECKPOINTING, CHECKPOINT_LAYERS
 import logging
 
 # Set up logging
@@ -42,7 +45,7 @@ load_dotenv(dotenv_path=".env")
 
 # Import project modules
 from src.config import *
-from src.model import AnameeModel, count_parameters, model_size_mb
+from src.model import LightningModel, LightningConfig, count_parameters, model_size_mb
 from src.dataset import Curriculum2BTokenDataset, build_val_dataset
 from src.validate import validate
 
@@ -429,18 +432,23 @@ def main():
     
     # Initialize model
     logger.info("Initializing model...")
-    model = AnameeModel(
+    # Initialize model
+    config = LightningConfig(
         vocab_size=tokenizer.vocab_size,
         dim=MODEL_DIM,
         num_heads=NUM_HEADS,
+        num_kv_heads=NUM_KV_HEADS,
         hidden_dim=HIDDEN_DIM,
         num_layers=NUM_LAYERS,
-        num_kv_heads=NUM_KV_HEADS,
         max_seq_len=BLOCK_SIZE,
-        dropout=0.0,  # No dropout during pretraining
+        dropout=0.0,
+        embedding_dropout=EMBEDDING_DROPOUT,
+        activation=ACTIVATION,
+        rope_scaling_factor=ROPE_SCALING_FACTOR if USE_ROPE_SCALING else 1.0,
         use_checkpoint=GRADIENT_CHECKPOINTING,
-        checkpoint_start_layer=8
-    ).to(device)
+        checkpoint_layers=CHECKPOINT_LAYERS
+    )
+    model = LightningModel(config).to(device)
     
     if is_main_process():
         param_count = count_parameters(model)
@@ -457,6 +465,7 @@ def main():
         tokenizer=tokenizer,
         block_size=BLOCK_SIZE,
         easy_token_target=EASY_TOKEN_TARGET,
+        medium_token_target=MEDIUM_TOKEN_TARGET,
         hard_token_target=HARD_TOKEN_TARGET,
         seed=SEED,
         shard_id=args.rank,
