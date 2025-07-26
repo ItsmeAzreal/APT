@@ -23,11 +23,21 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 # Environment setup
 export CUDA_VISIBLE_DEVICES=0  # Use first GPU for single GPU, or 0,1 for multi
 export OMP_NUM_THREADS=8
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+#export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 export TORCH_ALLOW_TF32=1
 export CUDNN_ALLOW_TF32=1
 export TOKENIZERS_PARALLELISM=false
 export NCCL_DEBUG=ERROR  # Reduce verbosity
+# Memory optimization
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,roundup_power2_divisions:16
+
+# Performance optimizations  
+export CUDA_LAUNCH_BLOCKING=0
+export TORCH_CUDNN_USE_HEURISTIC_MODE_B=1
+
+# PyTorch 2.0 compilation
+export TORCH_COMPILE_MODE=max-autotune
+export TORCHDYNAMO_DISABLE_GUARD_VIOLATIONS=1
 
 # Check for .env file
 if [ ! -f ".env" ]; then

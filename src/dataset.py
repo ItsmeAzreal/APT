@@ -128,8 +128,8 @@ class Curriculum2BTokenDataset(IterableDataset):
         cache_dir: Optional[str] = None,
         max_retries: int = 3,
         retry_delay: float = 5.0,
-        buffer_size: int = 50000,
-        window_overlap: float = 0.1  # 10% overlap between windows
+        buffer_size: int = 100000,
+        window_overlap: float = 0.0  # 10% overlap between windows
     ):
         self.tokenizer = tokenizer
         self.block_size = block_size
@@ -258,7 +258,7 @@ class Curriculum2BTokenDataset(IterableDataset):
                 
                 # Progress reporting
                 current_time = time.time()
-                if current_time - last_progress_time > 30:  # Every 30 seconds
+                if current_time - last_progress_time > 60:  # Every 60 seconds
                     elapsed = current_time - start_time
                     tokens_per_sec = total_tokens_yielded / elapsed if elapsed > 0 else 0
                     progress_pct = (curr_tokens / token_target * 100) if token_target > 0 else 0

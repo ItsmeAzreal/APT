@@ -40,7 +40,7 @@ MIN_LEARNING_RATE = 3e-5                          # For cosine decay
 WEIGHT_DECAY = 0.1                            # AdamW weight decay
 EMBEDDING_DROPOUT = 0.1  # Dropout rate for embedding layer
 DROPOUT = 0.1           # General dropout rate for attention/FFN
-ACTIVATION = "silu" # Activation function type (options: "relu", "gelu", "silu")
+ACTIVATION = "swish" # Activation function type (options: "relu", "gelu", "silu")
 USE_ROPE_SCALING = True         # Enable RoPE scaling
 ROPE_SCALING_FACTOR = 2.0       # Scaling factor for position embeddings
 
@@ -61,7 +61,7 @@ PREFETCH_FACTOR = 2              # Prefetch batches
 MODEL_DIM = 640
 NUM_LAYERS = 24
 NUM_HEADS = 10
-NUM_KV_HEADS = 4                 # Grouped query attention
+NUM_KV_HEADS = 2                 # Grouped query attention
 HIDDEN_DIM = 2560
 VOCAB_SIZE = 32000               # LLaMA tokenizer vocab size
 
@@ -81,6 +81,7 @@ CHECKPOINT_DIR = "checkpoints"
 RUNS_DIR = "runs/experiment_3b"
 PROGRESS_FILE = "training_progress.json"
 GRADIENT_CHECKPOINTING = True    # Enable gradient checkpointing
+CHECKPOINT_LAYERS = list(range(0, NUM_LAYERS, 2))  # Every 2nd layer
 CHECKPOINT_LAYERS = [            # List of layer indices to checkpoint
     2, 5, 8, 11, 14, 17, 20, 23 # Example: checkpoint every 3rd layer in a 24-layer model
 ]  

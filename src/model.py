@@ -39,8 +39,8 @@ class RMSNorm(nn.Module):
         self.scale = nn.Parameter(torch.ones(dim))
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        rms = x.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
-        return x / rms * self.scale
+        norm = x.norm(dim=-1, keepdim=True, dtype=torch.float32) #-------------------------
+        return x * (self.scale / norm.to(x.dtype).add(self.eps))
 
 class RotaryPositionEmbedding(nn.Module):
     """Rotary Position Embeddings with scaling support"""
@@ -138,8 +138,14 @@ class LightningAttention(nn.Module):
             q = q.transpose(1, 2)
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
+
+            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16  #newly added ------------------------------------
+            q = q.to(torch.float16)     #newly added ------------------------------------
+            k = k.to(torch.float16)
+            v = v.to(torch.float16)    #------------------------------------
+
             out = flash_attn_func(q, k, v, dropout_p=self.dropout, causal=True)
-            out = out.view(B, T, C)
+            out = out.reshape(B, T, C)  # newly added --------------------------
         else:
             # Standard attention with memory optimization
             out = F.scaled_dot_product_attention(
@@ -151,7 +157,7 @@ class LightningAttention(nn.Module):
             )
             out = out.transpose(1, 2).contiguous().view(B, T, C)
         
-        return self.o_proj(out)
+        return self.o_proj(out.float())      #newly added ----------------------------------
 
 class LightningFFN(nn.Module):
     """Optimized FFN with Swish activation"""
