@@ -17,8 +17,8 @@ TRAINING_DAYS = 6                     # 3B / 500M = 6 days
 
 # === TRAINING BATCH AND SEQUENCE SETTINGS ===
 # Adjusted for A100 40GB memory constraints
-BATCH_SIZE = 64                       # Per GPU batch size
-BLOCK_SIZE = 2048                     # Sequence length in tokens
+BATCH_SIZE = 32                       # Per GPU batch size
+BLOCK_SIZE = 1024                     # Sequence length in tokens
 ACCUMULATION_STEPS = 2                # Gradient accumulation steps
 VAL_BATCH_SIZE = 32                   # Validation batch size
 
